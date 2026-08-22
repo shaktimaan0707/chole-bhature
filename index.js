@@ -21,6 +21,15 @@ if (!fs.existsSync(path.join(__dirname, '.secret'))) {
 const app = express();
 app.use(express.json());
 
+// Anti-Leech & Author Attribution Headers (GNU AGPL-3.0)
+app.use((req, res, next) => {
+    res.setHeader('X-Powered-By', 'Chole-Bhature (https://github.com/SA7ANI/chole-bhature)');
+    res.setHeader('X-Addon-Author', 'SA7ANI (https://github.com/SA7ANI/chole-bhature)');
+    res.setHeader('X-Repository', 'https://github.com/SA7ANI/chole-bhature');
+    res.setHeader('X-License', 'GNU AGPL-3.0');
+    next();
+});
+
 // Persistent User Configuration Store
 const CONFIGS_FILE = path.join(__dirname, 'user_configs.json');
 const userConfigs = new Map();
@@ -224,6 +233,67 @@ async function getTmdbId(imdbId, type) {
     return null;
 }
 
+// Debrid Resolver Endpoint
+app.get('/debrid/:service/:apiKey/:hash', async (req, res) => {
+    const { service, apiKey, hash } = req.params;
+    
+    try {
+        if (service === 'realdebrid') {
+            // 1. Add Magnet
+            const addRes = await axios.post('https://api.real-debrid.com/rest/1.0/torrents/addMagnet', `magnet=magnet:?xt=urn:btih:${hash}`, {
+                headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/x-www-form-urlencoded' }
+            });
+            const torrentId = addRes.data.id;
+            
+            // 2. Select Files (All)
+            await axios.post(`https://api.real-debrid.com/rest/1.0/torrents/selectFiles/${torrentId}`, 'files=all', {
+                headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/x-www-form-urlencoded' }
+            });
+            
+            // 3. Get Info and grab the first download link
+            const infoRes = await axios.get(`https://api.real-debrid.com/rest/1.0/torrents/info/${torrentId}`, {
+                headers: { 'Authorization': `Bearer ${apiKey}` }
+            });
+            
+            if (infoRes.data && infoRes.data.links && infoRes.data.links.length > 0) {
+                // 4. Unrestrict link
+                const unrestrictRes = await axios.post('https://api.real-debrid.com/rest/1.0/unrestrict/link', `link=${infoRes.data.links[0]}`, {
+                    headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/x-www-form-urlencoded' }
+                });
+                
+                if (unrestrictRes.data && unrestrictRes.data.download) {
+                    return res.redirect(302, unrestrictRes.data.download);
+                }
+            }
+        } else if (service === 'alldebrid') {
+            // 1. Add Magnet
+            const addRes = await axios.get(`https://api.alldebrid.com/v4/magnet/upload?agent=nuvio&apikey=${apiKey}&magnets[]=magnet:?xt=urn:btih:${hash}`);
+            const magnetData = addRes.data?.data?.magnets?.[0];
+            
+            if (magnetData && magnetData.id) {
+                // 2. Wait a moment for processing (in a real app we should poll, but here we do a quick timeout)
+                await new Promise(r => setTimeout(r, 1000));
+                
+                const statusRes = await axios.get(`https://api.alldebrid.com/v4/magnet/status?agent=nuvio&apikey=${apiKey}&id=${magnetData.id}`);
+                const links = statusRes.data?.data?.magnets?.[0]?.links;
+                
+                if (links && links.length > 0) {
+                    // 3. Unrestrict
+                    const unrestrictRes = await axios.get(`https://api.alldebrid.com/v4/link/unlock?agent=nuvio&apikey=${apiKey}&link=${links[0].link}`);
+                    if (unrestrictRes.data && unrestrictRes.data.data && unrestrictRes.data.data.link) {
+                        return res.redirect(302, unrestrictRes.data.data.link);
+                    }
+                }
+            }
+        }
+    } catch (err) {
+        console.error('[Debrid Error]', err.response?.data || err.message);
+    }
+    
+    // Fallback: If debrid fails, redirect to a generic error video or just fail
+    res.status(500).send('Debrid resolution failed.');
+});
+
 // Addon builder factory
 function createAddon(config) {
     if (config && config.enableDoh !== undefined) setDohEnabled(config.enableDoh !== false);
@@ -246,9 +316,9 @@ function createAddon(config) {
 
     const builder = new addonBuilder({
         id: addonId,
-        version: '3.0.0',
+        version: '4.0.0',
         name: addonName,
-        description: 'Dynamically loads Nuvio providers, tests stream speed, and sorts them.',
+        description: 'High-Performance Stream Meta-Sorter & Priority Engine for Nuvio & Stremio. Scrapes, verifies, filters dead links, and organizes streams by speed, quality, and language.',
         logo: addonLogo,
         catalogs: [],
         resources: ['stream'],
@@ -389,7 +459,11 @@ function createAddon(config) {
                 prioritizeHindi: config.prioritizeHindi,
                 preferredLanguages: config.preferredLanguages || (config.prioritizeHindi ? ['Hindi', 'Dual-Audio'] : []),
                 showSeeders: config.showSeeders !== false,
-                deduplicateStreams: config.deduplicateStreams !== false
+                deduplicateStreams: config.deduplicateStreams !== false,
+                debridProvider: config.debridProvider,
+                debridApiKey: config.debridApiKey,
+                addonHost: config.addonHost,
+                addonProtocol: config.addonProtocol
             }, providerAnalytics);
 
             // Save to cache
@@ -561,8 +635,16 @@ app.use('/:configJSON', (req, res, next) => {
 const PORT = process.env.PORT || 7000;
 if (!process.env.VERCEL) {
     app.listen(PORT, () => {
-        console.log(`Stremio Nuvio Meta-Sorter Addon running at http://localhost:${PORT}`);
-        console.log(`Configure at http://localhost:${PORT}/configure`);
+        console.log(`
+========================================================================
+  🌶️  CHOLE BHATURE • Meta-Sorter & Priority Engine v4.0.0
+  ⚡  Created by SA7ANI | https://github.com/SA7ANI/chole-bhature
+  🛡️  Licensed under GNU AGPL-3.0 • Attribution Required
+========================================================================
+  🚀 Local Sorter Server: http://localhost:${PORT}
+  ⚙️  Configuration UI:    http://localhost:${PORT}/configure
+========================================================================
+        `);
     });
 }
 
